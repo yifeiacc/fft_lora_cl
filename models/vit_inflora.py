@@ -274,40 +274,54 @@ class Attention_LoRA(nn.Module):
             weight_v = torch.stack([torch.mm(self.lora_B_v[t].weight, self.lora_A_v[t].weight) for t in range(task)], dim=0).sum(dim=0)
         return weight_k, weight_v
     
-    
-    
+
+def FFT_SHIFT(matrix):
+        m_clone = matrix.clone()
+        m,n = m_clone.shape
+        m = int(m / 2)
+        n = int(n / 2)
+
+        for i in range(m):
+            for j in range(n):
+                m_clone[i][j] = matrix[m+i][n+j]
+                m_clone[m+i][n+j] = matrix[i][j]
+                m_clone[m+i][j] = matrix[i][j+n]
+                m_clone[i][j+n] = matrix[m+i][j]
+        return m_clone
+
+import numpy as np
 class Attention_LoRA_FFT(Attention_LoRA):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., r=64, n_tasks=10, n_frq=7680):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., r=64, n_tasks=10, n_frq=3000):
         super().__init__(dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop, r, n_tasks)
 
         self.n_frq = n_frq
         self.coef = nn.ParameterList([nn.Parameter(torch.randn(self.n_frq), requires_grad=True) for _ in range(n_tasks)]).to(self.qkv.weight.device)
-        self.pos = [self.select_pos().to(self.qkv.weight.device) for _ in range(n_tasks)]
+        self.indices = [self.select_pos(t, self.dim).to(self.qkv.weight.device) for t in range(n_tasks)]
     def init_param(self):
         for t in range(len(self.coef)):
-            nn.init.normal_(self.coef[t], mean=0, std=0.02)
+            nn.init.zeros_(self.coef[t])
 
     def init_param_ada(self, t, r):
         self.coef[t] = nn.Parameter(torch.randn(self.n_frq), requires_grad=True).to(self.qkv.weight.device)
     
-    def select_pos(self):
-        pos = torch.randperm(self.dim*self.dim)[:self.n_frq]
-        return torch.stack([pos//self.dim, pos%self.dim], dim=-1).view(1, -1, 2)
+    def select_pos(self, t, dim, seed=777):
+        indices = torch.randperm(dim * dim, generator=torch.Generator().manual_seed(seed+t))[:self.n_frq]
+        indices = torch.stack([indices // dim, indices % dim], dim=0)
+        return indices
     
-    def get_delta_w(self, task, alpha=1.0):
-        pos = self.pos[task]
+    def get_delta_w(self, task, alpha=300):
+        indices = self.indices[task]
         F = torch.zeros(self.dim, self.dim).to(self.qkv.weight.device)
-        F[pos[:,:,0], pos[:,:,1]] =  self.coef[task]
-        F[pos[:,:,1], pos[:,:,0]] = -self.coef[task]
+        F[indices[0,:], indices[1,:]] =  self.coef[task]
         return torch.fft.ifft2(F, dim=(-2,-1)).real * alpha
 
     def forward(self, x, task, register_hook=False, get_feat=False,get_cur_feat=False):
-        if get_feat:
-            self.matrix = (self.matrix*self.n_matrix + torch.bmm(x.detach().permute(0, 2, 1), x.detach()).sum(dim=0).cpu())/(self.n_matrix + x.shape[0]*x.shape[1])
-            self.n_matrix += x.shape[0]*x.shape[1]
-        if get_cur_feat:
-            self.cur_matrix = (self.cur_matrix*self.n_cur_matrix + torch.bmm(x.detach().permute(0, 2, 1), x.detach()).sum(dim=0).cpu())/(self.n_cur_matrix + x.shape[0]*x.shape[1])
-            self.n_cur_matrix += x.shape[0]*x.shape[1]
+        # if get_feat:
+        #     self.matrix = (self.matrix*self.n_matrix + torch.bmm(x.detach().permute(0, 2, 1), x.detach()).sum(dim=0).cpu())/(self.n_matrix + x.shape[0]*x.shape[1])
+        #     self.n_matrix += x.shape[0]*x.shape[1]
+        # if get_cur_feat:
+        #     self.cur_matrix = (self.cur_matrix*self.n_cur_matrix + torch.bmm(x.detach().permute(0, 2, 1), x.detach()).sum(dim=0).cpu())/(self.n_cur_matrix + x.shape[0]*x.shape[1])
+        #     self.n_cur_matrix += x.shape[0]*x.shape[1]
 
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)

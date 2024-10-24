@@ -343,7 +343,7 @@ class InfLoRA(BaseLearner):
                     U1,S1,Vh1=np.linalg.svd(activation, full_matrices=False)
                     sval_total = (S1**2).sum()
                     # Projected Representation (Eq-8)
-                    act_hat = activation - np.dot(np.dot(self.feature_list[i],self.feature_list[i].transpose()),activation)
+                    act_hat = activation - np.dot(np.dot(self.feature_list[i],self.feature_list[i].T),activation)
                     U,S,Vh = np.linalg.svd(act_hat, full_matrices=False)
                     # criteria (Eq-9)
                     sval_hat = (S**2).sum()
@@ -372,7 +372,7 @@ class InfLoRA(BaseLearner):
                     U1,S1,Vh1=np.linalg.svd(activation, full_matrices=False)
                     sval_total = (S1**2).sum()
                     # Projected Representation (Eq-8)
-                    act_hat = np.dot(np.dot(self.feature_list[i],self.feature_list[i].transpose()),activation)
+                    act_hat = np.dot(np.dot(self.feature_list[i],self.feature_list[i].T),activation)
                     U,S,Vh = np.linalg.svd(act_hat, full_matrices=False)
                     # criteria (Eq-9)
                     sval_hat = (S**2).sum()
@@ -391,7 +391,7 @@ class InfLoRA(BaseLearner):
                         continue
 
                     # update GPM by Projected Representation (Eq-8)
-                    act_feature = self.feature_list[i] - np.dot(np.dot(U[:,0:r],U[:,0:r].transpose()),self.feature_list[i])
+                    act_feature = self.feature_list[i] - np.dot(np.dot(U[:,0:r],U[:,0:r].T),self.feature_list[i])
                     Ui, Si, Vi = np.linalg.svd(act_feature)
                     self.feature_list[i]=Ui[:,:self.feature_list[i].shape[1]-r]
 
@@ -431,7 +431,7 @@ class InfLoRA(BaseLearner):
                 U1,S1,Vh1=np.linalg.svd(activation, full_matrices=False)
                 sval_total = (S1**2).sum()
                 # Projected Representation (Eq-8)
-                act_hat = activation - np.dot(np.dot(self.feature_list[i],self.feature_list[i].transpose()),activation)
+                act_hat = activation - np.dot(np.dot(self.feature_list[i],self.feature_list[i].T),activation)
                 U,S,Vh = np.linalg.svd(act_hat, full_matrices=False)
                 # criteria (Eq-9)
                 sval_hat = (S**2).sum()
