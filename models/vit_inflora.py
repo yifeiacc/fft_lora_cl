@@ -295,24 +295,39 @@ class Attention_LoRA_FFT(Attention_LoRA):
         super().__init__(dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop, r, n_tasks)
 
         self.n_frq = n_frq
-        self.coef = nn.ParameterList([nn.Parameter(torch.randn(self.n_frq), requires_grad=True) for _ in range(n_tasks)]).to(self.qkv.weight.device)
-        self.indices = [self.select_pos(t, self.dim).to(self.qkv.weight.device) for t in range(n_tasks)]
-    def init_param(self):
-        for t in range(len(self.coef)):
-            nn.init.zeros_(self.coef[t])
+        self.coef_k = nn.ParameterList([nn.Parameter(torch.randn(self.n_frq), requires_grad=True) for _ in range(n_tasks)]).to(self.qkv.weight.device)
+        self.coef_v = nn.ParameterList([nn.Parameter(torch.randn(self.n_frq), requires_grad=True) for _ in range(n_tasks)]).to(self.qkv.weight.device)
 
-    def init_param_ada(self, t, r):
-        self.coef[t] = nn.Parameter(torch.randn(self.n_frq), requires_grad=True).to(self.qkv.weight.device)
+        self.indices = [self.select_pos(t, self.dim).to(self.qkv.weight.device) for t in range(n_tasks)]
+        self.MoE = False
+        if self.MoE:
+            self.gate = nn.Linear(self.dim, n_tasks)
+           
+            
+    def init_param(self):
+        for t in range(len(self.coef_k)):
+            nn.init.zeros_(self.coef_k[t])
+        for t in range(len(self.coef_v)):
+            nn.init.zeros_(self.coef_v[t])
+
+    # def init_param_ada(self, t, r):
+    #     self.coef[t] = nn.Parameter(torch.randn(self.n_frq), requires_grad=True).to(self.qkv.weight.device)
     
     def select_pos(self, t, dim, seed=777):
-        indices = torch.randperm(dim * dim, generator=torch.Generator().manual_seed(seed+t))[:self.n_frq]
+        indices = torch.randperm(dim * dim, generator=torch.Generator().manual_seed(seed+t*10))[:self.n_frq]
         indices = torch.stack([indices // dim, indices % dim], dim=0)
         return indices
     
-    def get_delta_w(self, task, alpha=300):
+    def get_delta_w_k(self, task, alpha=300):
         indices = self.indices[task]
         F = torch.zeros(self.dim, self.dim).to(self.qkv.weight.device)
-        F[indices[0,:], indices[1,:]] =  self.coef[task]
+        F[indices[0,:], indices[1,:]] =  self.coef_k[task]
+        return torch.fft.ifft2(F, dim=(-2,-1)).real * alpha
+    
+    def get_delta_w_v(self, task, alpha=300):
+        indices = self.indices[task]
+        F = torch.zeros(self.dim, self.dim).to(self.qkv.weight.device)
+        F[indices[0,:], indices[1,:]] =  self.coef_v[task]
         return torch.fft.ifft2(F, dim=(-2,-1)).real * alpha
 
     def forward(self, x, task, register_hook=False, get_feat=False,get_cur_feat=False):
@@ -327,12 +342,29 @@ class Attention_LoRA_FFT(Attention_LoRA):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
 
+        if self.MoE:
+            gate_logits = self.gate(x)  # Shape: (batch_size, num_experts)
+
+            mask = torch.zeros(self.n_tasks).to(self.qkv.weight.device)
+            mask[:task] = 1
+            gate_logits = gate_logits.masked_fill(mask == 0, float('-inf'))
+
+            # Compute softmax over masked logits
+            gate_values = F.softmax(gate_logits, dim=-1)  # Shape: (batch_size, num_experts)
+
+            # Compute expert outputs
+            expert_outputs = torch.stack([self.get_delta_w(t) for t in range(task+1)], dim=0).sum(dim=0)  # Shape: (batch_size, num_experts, expert_dim)
+
+            # Weighted sum of expert outputs
+            weighted_expert_output = torch.einsum('be,bed->bd', gate_values, expert_outputs)  # Shape: (batch_size, expert_dim)
+
+        else:
         # insert lora   
-        if task > -0.5:
-            weight_k = torch.stack([self.get_delta_w(t) for t in range(task+1)], dim=0).sum(dim=0)
-            weight_v = torch.stack([self.get_delta_w(t) for t in range(task+1)], dim=0).sum(dim=0)
-            k = k + F.linear(x, weight_k).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-            v = v + F.linear(x, weight_v).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+            if task > -0.5:
+                weight_k = torch.stack([self.get_delta_w_k(t) for t in range(task+1)], dim=0).sum(dim=0)
+                weight_v = torch.stack([self.get_delta_w_v(t) for t in range(task+1)], dim=0).sum(dim=0)
+        k = k + F.linear(x, weight_k).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        v = v + F.linear(x, weight_v).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
