@@ -11,14 +11,14 @@ from sklearn.cluster import KMeans
 
 from methods.base import BaseLearner
 from utils.toolkit import tensor2numpy, accuracy
-from models.sinet_inflora import SiNet
-from models.vit_inflora import Attention_LoRA
+from models.sinet_fft import SiNet
+from models.vit_inflora import Attention_LoRA_FFT
 from copy import deepcopy
 from utils.schedulers import CosineSchedule
 import ipdb
 import math
 
-class InfLoRA(BaseLearner):
+class InfLoRA_FFT(BaseLearner):
 
     def __init__(self, args):
         super().__init__(args)
@@ -29,7 +29,7 @@ class InfLoRA(BaseLearner):
             raise ValueError('Unknown net: {}.'.format(args["net_type"]))
         
         for module in self._network.modules():
-            if isinstance(module, Attention_LoRA):
+            if isinstance(module, Attention_LoRA_FFT):
                 module.init_param()
 
         self.args = args
@@ -95,16 +95,12 @@ class InfLoRA(BaseLearner):
             try:
                 if "classifier_pool" + "." + str(self._network.module.numtask - 1) in name:
                     param.requires_grad_(True)
-                if "lora_B_k" + "." + str(self._network.module.numtask - 1) in name:
-                    param.requires_grad_(True)
-                if "lora_B_v" + "." + str(self._network.module.numtask - 1) in name:
+                if "coef" + "." + str(self._network.module.numtask - 1) in name:
                     param.requires_grad_(True)
             except:
                 if "classifier_pool" + "." + str(self._network.numtask - 1) in name:
                     param.requires_grad_(True)
-                if "lora_B_k" + "." + str(self._network.numtask - 1) in name:
-                    param.requires_grad_(True)
-                if "lora_B_v" + "." + str(self._network.numtask - 1) in name:
+                if "coef" + "." + str(self._network.numtask - 1) in name:
                     param.requires_grad_(True)
 
         # Double check
@@ -119,16 +115,16 @@ class InfLoRA(BaseLearner):
                 self._network(inputs, get_cur_feat=True)
                 # if i > 3: break
 
-            if self._cur_task == 0:
-                for module in self._network.modules():
-                    if isinstance(module, Attention_LoRA):
-                        cur_matrix = module.cur_matrix
-                        U, S, V = torch.linalg.svd(cur_matrix)
-                        module.lora_A_k[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
-                        module.lora_A_v[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
-                        module.cur_matrix.zero_()
-                        module.n_cur_matrix = 0
-            else:
+            # if self._cur_task == 0:
+            #     for module in self._network.modules():
+            #         if isinstance(module, Attention_LoRA):
+            #             cur_matrix = module.cur_matrix
+            #             U, S, V = torch.linalg.svd(cur_matrix)
+            #             module.lora_A_k[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
+            #             module.lora_A_v[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
+            #             module.cur_matrix.zero_()
+            #             module.n_cur_matrix = 0
+            # else:
                 # kk = 0
                 # for module in self._network.modules():
                 #     if isinstance(module, Attention_LoRA):
@@ -141,21 +137,21 @@ class InfLoRA(BaseLearner):
                 #         module.n_cur_matrix = 0
                 #         kk += 1
 
-                kk = 0
-                for module in self._network.modules():
-                    if isinstance(module, Attention_LoRA):
-                        cur_matrix = module.cur_matrix
-                        if self.project_type[kk] == 'remove':
-                            cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
-                        else:
-                            assert self.project_type[kk] == 'retain'
-                            cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
-                        cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
-                        module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
-                        module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
-                        module.cur_matrix.zero_()
-                        module.n_cur_matrix = 0
-                        kk += 1
+                # kk = 0
+                # for module in self._network.modules():
+                #     if isinstance(module, Attention_LoRA):
+                #         cur_matrix = module.cur_matrix
+                #         if self.project_type[kk] == 'remove':
+                #             cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
+                #         else:
+                #             assert self.project_type[kk] == 'retain'
+                #             cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
+                #         cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
+                #         module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+                #         module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+                #         module.cur_matrix.zero_()
+                #         module.n_cur_matrix = 0
+                #         kk += 1
 
         print(f"Parameters to be updated: {enabled}")
         if len(self._multiple_gpus) > 1:
@@ -185,26 +181,26 @@ class InfLoRA(BaseLearner):
         if len(self._multiple_gpus) > 1:
             self._network = self._network.module
 
-        with torch.no_grad():
-            for i, (_, inputs, targets) in enumerate(train_loader):
-                inputs, targets = inputs.to(self._device), targets.to(self._device)
-                self._network(inputs, get_cur_feat=True)
+        # with torch.no_grad():
+        #     for i, (_, inputs, targets) in enumerate(train_loader):
+        #         inputs, targets = inputs.to(self._device), targets.to(self._device)
+        #         self._network(inputs, get_cur_feat=True)
 
-            mat_list = []
-            for module in self._network.modules():
-                if isinstance(module, Attention_LoRA):
-                    mat_list.append(deepcopy(module.cur_matrix))
-                    module.cur_matrix.zero_()
-                    module.n_cur_matrix = 0
-            # self.update_GPM(mat_list)
-            self.update_DualGPM(mat_list)
+        #     mat_list = []
+        #     for module in self._network.modules():
+        #         if isinstance(module, Attention_LoRA):
+        #             mat_list.append(deepcopy(module.cur_matrix))
+        #             module.cur_matrix.zero_()
+        #             module.n_cur_matrix = 0
+        #     # self.update_GPM(mat_list)
+        #     self.update_DualGPM(mat_list)
 
-            # Projection Matrix Precomputation
-            self.feature_mat = []
-            for p in range(len(self.feature_list)):
-                Uf=torch.Tensor(np.dot(self.feature_list[p],self.feature_list[p].T))
-                print('Layer {} - Projection Matrix shape: {}'.format(p+1,Uf.shape))
-                self.feature_mat.append(Uf)
+        #     # Projection Matrix Precomputation
+        #     self.feature_mat = []
+        #     for p in range(len(self.feature_list)):
+        #         Uf=torch.Tensor(np.dot(self.feature_list[p],self.feature_list[p].T))
+        #         print('Layer {} - Projection Matrix shape: {}'.format(p+1,Uf.shape))
+        #         self.feature_mat.append(Uf)
 
         return
 

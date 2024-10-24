@@ -172,6 +172,8 @@ default_cfgs = {
 }
 
 
+
+
 class Attention_LoRA(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., r=64, n_tasks=10):
         super().__init__()
@@ -271,6 +273,66 @@ class Attention_LoRA(nn.Module):
             weight_k = torch.stack([torch.mm(self.lora_B_k[t].weight, self.lora_A_k[t].weight) for t in range(task)], dim=0).sum(dim=0)
             weight_v = torch.stack([torch.mm(self.lora_B_v[t].weight, self.lora_A_v[t].weight) for t in range(task)], dim=0).sum(dim=0)
         return weight_k, weight_v
+    
+    
+    
+class Attention_LoRA_FFT(Attention_LoRA):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., r=64, n_tasks=10, n_frq=7680):
+        super().__init__(dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop, r, n_tasks)
+
+        self.n_frq = n_frq
+        self.coef = nn.ParameterList([nn.Parameter(torch.randn(self.n_frq), requires_grad=True) for _ in range(n_tasks)]).to(self.qkv.weight.device)
+        self.pos = [self.select_pos().to(self.qkv.weight.device) for _ in range(n_tasks)]
+    def init_param(self):
+        for t in range(len(self.coef)):
+            nn.init.normal_(self.coef[t], mean=0, std=0.02)
+
+    def init_param_ada(self, t, r):
+        self.coef[t] = nn.Parameter(torch.randn(self.n_frq), requires_grad=True).to(self.qkv.weight.device)
+    
+    def select_pos(self):
+        pos = torch.randperm(self.dim*self.dim)[:self.n_frq]
+        return torch.stack([pos//self.dim, pos%self.dim], dim=-1).view(1, -1, 2)
+    
+    def get_delta_w(self, task, alpha=1.0):
+        pos = self.pos[task]
+        F = torch.zeros(self.dim, self.dim).to(self.qkv.weight.device)
+        F[pos[:,:,0], pos[:,:,1]] =  self.coef[task]
+        F[pos[:,:,1], pos[:,:,0]] = -self.coef[task]
+        return torch.fft.ifft2(F, dim=(-2,-1)).real * alpha
+
+    def forward(self, x, task, register_hook=False, get_feat=False,get_cur_feat=False):
+        if get_feat:
+            self.matrix = (self.matrix*self.n_matrix + torch.bmm(x.detach().permute(0, 2, 1), x.detach()).sum(dim=0).cpu())/(self.n_matrix + x.shape[0]*x.shape[1])
+            self.n_matrix += x.shape[0]*x.shape[1]
+        if get_cur_feat:
+            self.cur_matrix = (self.cur_matrix*self.n_cur_matrix + torch.bmm(x.detach().permute(0, 2, 1), x.detach()).sum(dim=0).cpu())/(self.n_cur_matrix + x.shape[0]*x.shape[1])
+            self.n_cur_matrix += x.shape[0]*x.shape[1]
+
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
+
+        # insert lora   
+        if task > -0.5:
+            weight_k = torch.stack([self.get_delta_w(t) for t in range(task+1)], dim=0).sum(dim=0)
+            weight_v = torch.stack([self.get_delta_w(t) for t in range(task+1)], dim=0).sum(dim=0)
+            k = k + F.linear(x, weight_k).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+            v = v + F.linear(x, weight_v).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+                
+        if register_hook:
+            self.save_attention_map(attn)
+            attn.register_hook(self.save_attn_gradients)        
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
 
 class LayerScale(nn.Module):
     def __init__(self, dim, init_values=1e-5, inplace=False):
@@ -304,6 +366,12 @@ class Block(nn.Module):
         x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x), task, register_hook=register_hook, get_feat=get_feat, get_cur_feat=get_cur_feat)))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         return x
+    
+class Block_FFT(Block):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0., init_values=None,
+            drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, n_tasks=10, r=64):
+        super().__init__(dim, num_heads, mlp_ratio, qkv_bias, drop, attn_drop, init_values, drop_path, act_layer, norm_layer, n_tasks, r)
+        self.attn = Attention_LoRA_FFT(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop, n_tasks=n_tasks, r=r)
 
 
 class ParallelBlock(nn.Module):

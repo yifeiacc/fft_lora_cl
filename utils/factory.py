@@ -7,6 +7,7 @@ from methods.inflorab5_domain import InfLoRAb5_domain
 from methods.sprompt_coda import SPrompts_coda
 from methods.sprompt_l2p import SPrompts_l2p
 from methods.sprompt_dual import SPrompts_dual
+from methods.inflora_fft import InfLoRA_FFT
 
 def get_model(model_name, args):
     name = model_name.lower()
@@ -15,6 +16,7 @@ def get_model(model_name, args):
                'sprompts_dual': SPrompts_dual,
                'inflorab5': InfLoRAb5,
                'inflora': InfLoRA,
+               'inflora_fft': InfLoRA_FFT,
                'inflora_domain': InfLoRA_domain,
                'inflorab5_domain': InfLoRAb5_domain,
                'inflora_ca': InfLoRA_CA,
